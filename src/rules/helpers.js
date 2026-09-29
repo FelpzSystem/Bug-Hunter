@@ -129,8 +129,13 @@ export function analyzeLexicalScopes(ast) {
     for (const [key, value] of Object.entries(node)) {
       if (['loc', 'extra', 'comments', 'tokens', 'errors'].includes(key) || !value) continue;
       const childVariableKind = node.type === 'VariableDeclaration' && key === 'declarations' ? node.kind : null;
-      if (Array.isArray(value)) for (const child of value) if (child?.type) traverse(child, scope, childVariableKind);
-      else if (value.type) traverse(value, scope, childVariableKind);
+      if (Array.isArray(value)) {
+        for (const child of value) {
+          if (child?.type) traverse(child, scope, childVariableKind);
+        }
+      } else if (value?.type) {
+        traverse(value, scope, childVariableKind);
+      }
     }
   };
   traverse(ast, root);

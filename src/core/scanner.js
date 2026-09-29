@@ -1,11 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { builtinModules } from 'node:module';
-import { parseSource } from './parser.js';
+import { parseSource, sourceLanguage } from './parser.js';
+import { analyzePythonSource } from './python-analyzer.js';
 import { rules } from '../rules/index.js';
 import { hashFinding, isIgnoredLine, locOf, severityAtLeast, snippet, codeFrame, packageNameFromSpecifier, isLikelyBuiltin, lineCount, getCalleeName, walkAst } from './utils.js';
 
-const DEFAULT_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts']);
+const DEFAULT_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts', '.py', '.pyw', '.pyi']);
 const DEFAULT_IGNORES = ['node_modules', '.git', '.hg', '.svn', '.bug-hunter'];
 const DEFAULT_MAX_FILE_BYTES = 10 * 1024 * 1024;
 const ALWAYS_BINARY_EXTENSIONS = new Set(['.png','.jpg','.jpeg','.gif','.webp','.ico','.bmp','.tiff','.zip','.gz','.tgz','.tar','.7z','.rar','.pdf','.woff','.woff2','.ttf','.otf','.eot','.mp3','.wav','.ogg','.mp4','.mov','.avi','.webm','.exe','.dll','.so','.dylib','.node','.class']);
@@ -17,6 +18,7 @@ const DEFAULT_GLOBALS = new Set([
   'structuredClone','queueMicrotask','atob','btoa','TextEncoder','TextDecoder','URLPattern','crypto','require','module','exports','__dirname','__filename'
 ]);
 const NODE_BUILTINS = new Set(builtinModules.flatMap((name) => [name, name.startsWith('node:') ? name.slice(5) : `node:${name}`]));
+const moduleContextCache = new Map();
 
 export async function scanProject(inputPath = '.', options = {}) {
   const requested = path.resolve(inputPath);
@@ -27,7 +29,7 @@ export async function scanProject(inputPath = '.', options = {}) {
   const parseErrors = [];
   const fileData = [];
   const textFindings = [];
-  const skipped = { binary: [], oversized: [], unreadable: [] };
+  const skipped = { binary: [], oversized: [], unreadable: [], unsupported: [] };
   const files = await discoverFiles(requestedStat.isFile() ? requested : root, config, skipped);
 
   for (const file of files) {
@@ -51,8 +53,11 @@ export async function scanProject(inputPath = '.', options = {}) {
       continue;
     }
     const code = buffer.toString('utf8');
-    const isSource = config.extensions.has(path.extname(file).toLowerCase());
-    const metrics = { file: relative, lines: lineCount(code), bytes: Buffer.byteLength(code), imports: [], dynamicImports: 0, consoleCalls: 0, todos: 0, kind: isSource ? 'source' : 'text' };
+    const extension = path.extname(file).toLowerCase();
+    const isSource = config.extensions.has(extension);
+    const language = sourceLanguage(file);
+    const metrics = { file: relative, lines: lineCount(code), bytes: Buffer.byteLength(code), imports: [], pythonImports: [], dynamicImports: 0, consoleCalls: 0, todos: 0, kind: isSource ? 'source' : 'text', language };
+    if (isSource && language === 'text') metrics.language = extension ? 'unknown' : 'extensionless';
     const comments = extractCommentSignals(code);
     metrics.todos = comments.todoCount;
     try {
@@ -61,11 +66,39 @@ export async function scanProject(inputPath = '.', options = {}) {
         fileData.push(metrics);
         continue;
       }
+
+      if (language === 'python') {
+        textFindings.push(...scanTextFile(relative, code, config.contextLines, config.disableRules));
+        const py = await analyzePythonSource(code, file, config);
+        metrics.pythonAnalyzer = py.command ?? null;
+        if (py.unavailable) {
+          skipped.unsupported.push({ file: relative, language: 'python', reason: py.error ?? 'Python indisponível' });
+          fileData.push(metrics);
+          continue;
+        }
+        if (py.error && !py.syntaxError) {
+          skipped.unsupported.push({ file: relative, language: 'python', reason: py.error });
+          fileData.push(metrics);
+          continue;
+        }
+        for (const item of py.findings ?? []) {
+          pushForeignFinding(findings, code, relative, config, item);
+        }
+        metrics.pythonImports = py.imports ?? [];
+        metrics.imports = metrics.pythonImports.map((item) => item.name);
+        if (py.syntaxError) {
+          parseErrors.push({ file: relative, message: py.syntaxError.message, line: py.syntaxError.line ?? 1, column: py.syntaxError.column ?? 0, language: 'python' });
+        }
+        fileData.push(metrics);
+        continue;
+      }
+
+      const module = await resolveModuleContext(file, root);
       const ast = parseSource(code, file);
       const parents = new Map();
       buildParentMap(ast, parents);
       const ctx = {
-        ast, code, file: relative, root, parents, options: config,
+        ast, code, file: relative, root, parents, options: config, module,
         globals: new Set([...DEFAULT_GLOBALS, ...(config.globals ?? [])]),
         report(finding) {
           const line = finding.node?.loc?.start?.line ?? finding.line ?? 1;
@@ -87,6 +120,7 @@ export async function scanProject(inputPath = '.', options = {}) {
         }
       };
       collectFileSignals(ast, metrics);
+      metrics.module = module;
       const disabled = new Set(config.disableRules ?? []);
       for (const rule of rules.filter((r) => !r.scope || r.scope === 'file')) {
         if (disabled.has(rule.id)) continue;
@@ -185,6 +219,13 @@ async function loadConfig(root, options) {
     contextLines: Math.floor(finiteNumber(options.contextLines ?? fileConfig.contextLines, 2, 0)),
     disableRules: [...new Set(rawDisable.map((x) => String(x).trim().toUpperCase()).filter(Boolean))],
     consoleAllowedPaths: normalizePathList(options.consoleAllowedPaths ?? fileConfig.consoleAllowedPaths ?? ['tools', 'scripts', 'test', 'tests', 'examples']),
+    checkEsmExtensions: Boolean(options.checkEsmExtensions ?? fileConfig.checkEsmExtensions ?? true),
+    pythonCommand: options.pythonCommand ?? fileConfig.pythonCommand ?? '',
+    pythonTimeoutMs: finiteNumber(options.pythonTimeoutMs ?? fileConfig.pythonTimeoutMs, 5000, 500),
+    pythonDependencyAliases: {
+      yaml: 'pyyaml', PIL: 'pillow', cv2: 'opencv-python', bs4: 'beautifulsoup4', dotenv: 'python-dotenv', sklearn: 'scikit-learn',
+      ...(fileConfig.pythonDependencyAliases ?? {}), ...(options.pythonDependencyAliases ?? {})
+    },
     baseline: options.baseline ?? fileConfig.baseline ?? '.bug-hunter-baseline.json',
     baselineMode
   };
@@ -217,6 +258,56 @@ function buildParentMap(ast, map) {
   });
 }
 
+async function resolveModuleContext(file, root) {
+  const absoluteDir = path.dirname(file);
+  let dir = absoluteDir;
+  const visited = [];
+  while (true) {
+    if (moduleContextCache.has(dir)) {
+      const packageInfo = moduleContextCache.get(dir);
+      for (const item of visited) moduleContextCache.set(item, packageInfo);
+      return deriveModuleContext(file, packageInfo);
+    }
+    visited.push(dir);
+    try {
+      const manifest = JSON.parse(await fs.readFile(path.join(dir, 'package.json'), 'utf8'));
+      const packageInfo = { type: manifest.type === 'module' ? 'module' : 'commonjs', packageJson: path.join(dir, 'package.json') };
+      moduleContextCache.set(dir, packageInfo);
+      for (const item of visited) moduleContextCache.set(item, packageInfo);
+      return deriveModuleContext(file, packageInfo);
+    } catch {}
+    if (dir === path.dirname(dir)) break;
+    dir = path.dirname(dir);
+  }
+  const packageInfo = { type: 'commonjs', packageJson: null };
+  for (const item of visited) moduleContextCache.set(item, packageInfo);
+  return deriveModuleContext(file, packageInfo);
+}
+
+function deriveModuleContext(file, packageInfo) {
+  const ext = path.extname(file).toLowerCase();
+  let kind = 'cjs';
+  if (ext === '.mjs' || ext === '.mts') kind = 'esm';
+  else if (ext === '.cjs' || ext === '.cts') kind = 'cjs';
+  else if (packageInfo.type === 'module') kind = 'esm';
+  return { kind, packageType: packageInfo.type, packageJson: packageInfo.packageJson, extension: ext, explicit: ['.mjs', '.mts', '.cjs', '.cts'].includes(ext) };
+}
+
+function pushForeignFinding(findings, code, relative, config, finding) {
+  const line = finding.line ?? 1;
+  if (isIgnoredLine(code, line, finding.ruleId)) return;
+  const loc = { line, column: finding.column ?? 0, endLine: finding.endLine ?? line, endColumn: finding.endColumn ?? ((finding.column ?? 0) + 1) };
+  const out = {
+    id: '', ruleId: finding.ruleId, title: finding.title, category: finding.category, severity: finding.severity,
+    confidence: finding.confidence ?? 'high', message: finding.message, file: relative,
+    line: loc.line, column: loc.column, endLine: loc.endLine, endColumn: loc.endColumn,
+    snippet: finding.snippet ?? '', codeFrame: codeFrame(code, loc.line, loc.column, config.contextLines),
+    suggestion: finding.suggestion ?? null, evidence: finding.evidence ?? null
+  };
+  out.id = hashFinding(out);
+  findings.push(out);
+}
+
 function collectFileSignals(ast, metrics) {
   const imports = new Set();
   walkAst(ast, (n) => {
@@ -229,15 +320,18 @@ function collectFileSignals(ast, metrics) {
   metrics.imports = [...imports];
 }
 
-async function analyzeProject({ root, files, fileData, config, disabled = [] }) {
+async function analyzeProject({ root, files, fileData, config, skipped, disabled = [] }) {
   const disabledRules = new Set(disabled);
   const findings = [];
   const allImports = new Map();
-  for (const f of fileData) for (const spec of f.imports) {
-    const pkg = packageNameFromSpecifier(spec);
-    if (!pkg || isLikelyBuiltin(spec, NODE_BUILTINS)) continue;
-    if (!allImports.has(pkg)) allImports.set(pkg, []);
-    allImports.get(pkg).push(f.file);
+  for (const f of fileData) {
+    if (f.language === 'python') continue;
+    for (const spec of f.imports) {
+      const pkg = packageNameFromSpecifier(spec);
+      if (!pkg || isLikelyBuiltin(spec, NODE_BUILTINS)) continue;
+      if (!allImports.has(pkg)) allImports.set(pkg, []);
+      allImports.get(pkg).push(f.file);
+    }
   }
 
   let manifest = null;
@@ -252,6 +346,11 @@ async function analyzeProject({ root, files, fileData, config, disabled = [] }) 
     if (runtimeCount > 20 && !disabledRules.has('BH055')) addProjectFinding(findings, 'BH055', 'Large dependency surface', 'maintainability', 'info', 'package.json', `O projeto declara ${runtimeCount} dependências de runtime.`, 'Revise dependências diretas e prefira APIs nativas quando fizer sentido.');
   }
 
+  if (fileData.some((f) => f.language === 'python')) {
+    const pythonDeclared = await readPythonDeclaredDependencies(root);
+    analyzePythonDependencies(fileData, pythonDeclared, findings, disabledRules, config.pythonDependencyAliases);
+  }
+
   for (const f of fileData) {
     if (f.lines > config.maxFileLines && !disabledRules.has('BH056')) addProjectFinding(findings, 'BH056', 'Large file', 'maintainability', 'warning', f.file, `Arquivo com ${f.lines} linhas, acima do limite ${config.maxFileLines}.`, 'Divida por responsabilidade e preserve módulos menores.');
     if (f.consoleCalls > config.maxConsoleCalls && !disabledRules.has('BH057')) addProjectFinding(findings, 'BH057', 'Console flood', 'maintainability', 'warning', f.file, `Arquivo possui ${f.consoleCalls} chamadas de console, acima do limite ${config.maxConsoleCalls}.`, 'Consolide logging e remova debug temporário.');
@@ -259,6 +358,58 @@ async function analyzeProject({ root, files, fileData, config, disabled = [] }) 
   }
 
   return { findings, manifest, imports: [...allImports.entries()].map(([name, files]) => ({ name, files })) };
+}
+
+async function readPythonDeclaredDependencies(root) {
+  const declared = new Set();
+  let found = false;
+  const add = (name) => { const normalized = normalizePythonPackageName(name); if (normalized) declared.add(normalized); };
+  for (const name of ['requirements.txt', 'requirements-dev.txt', 'requirements-dev.in', 'requirements.in']) {
+    try {
+      const text = await fs.readFile(path.join(root, name), 'utf8');
+      found = true;
+      for (const line of text.split(/\r?\n/)) {
+        const clean = line.trim().replace(/\s+#.*$/, '');
+        if (!clean || clean.startsWith('#') || clean.startsWith('-r ') || clean.startsWith('--')) continue;
+        const match = clean.match(/^([A-Za-z0-9][A-Za-z0-9_.-]*)/);
+        if (match) add(match[1]);
+      }
+    } catch {}
+  }
+  try {
+    const toml = await fs.readFile(path.join(root, 'pyproject.toml'), 'utf8');
+    found = true;
+    for (const line of toml.split(/\r?\n/)) {
+      const matches = line.match(/^[\s\[\]"'-]*([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\[[^\]]+\])?\s*(?:[<>=!~;,]|$)/);
+      if (matches) add(matches[1]);
+      for (const quoted of line.matchAll(/["']([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\[[^\]]+\])?(?:[<>=!~;]|$)/g)) add(quoted[1]);
+    }
+  } catch {}
+  return { found, declared };
+}
+
+function normalizePythonPackageName(value) {
+  return String(value ?? '').trim().toLowerCase().replace(/[-_.]+/g, '-');
+}
+
+function analyzePythonDependencies(fileData, declaredInfo, findings, disabledRules, aliases = {}) {
+  if (!declaredInfo.found || disabledRules.has('BH080')) return;
+  const aliasesNormalized = Object.fromEntries(Object.entries(aliases ?? {}).map(([k, v]) => [String(k).toLowerCase(), normalizePythonPackageName(v)]));
+  const seen = new Map();
+  for (const file of fileData.filter((f) => f.language === 'python')) {
+    for (const item of file.pythonImports ?? []) {
+      if (item.stdlib) continue;
+      const importName = String(item.name ?? '').toLowerCase();
+      const candidate = aliasesNormalized[importName] ?? normalizePythonPackageName(importName);
+      if (!declaredInfo.declared.has(candidate)) {
+        if (!seen.has(candidate)) seen.set(candidate, []);
+        seen.get(candidate).push(file.file);
+      }
+    }
+  }
+  for (const [name, usedIn] of seen) {
+    addProjectFinding(findings, 'BH080', 'Undeclared Python dependency', 'correctness', 'warning', usedIn[0], `O módulo Python “${name}” é importado, mas não apareceu em requirements*.txt/pyproject.toml.`, 'Declare a distribuição correspondente na configuração Python ou confirme que ela é fornecida pelo ambiente.');
+  }
 }
 
 function analyzeDependencies(manifest, allImports, findings, disabledRules = new Set()) {
@@ -300,7 +451,7 @@ function summarize(findings, parseErrors, fileCount, rawFindingCount, baseline, 
   const byCategory = {}; const byRule = {};
   for (const f of findings) { bySeverity[f.severity]++; byCategory[f.category] = (byCategory[f.category] ?? 0) + 1; byRule[f.ruleId] = (byRule[f.ruleId] ?? 0) + 1; }
   const unreadable = skipped.unreadable?.length ?? 0;
-  return { filesScanned: fileCount, findings: findings.length, rawFindings: rawFindingCount, bySeverity, byCategory, byRule, parseErrors: parseErrors.length, unreadableFiles: unreadable, baselineEntries: baseline.size, passed: parseErrors.length === 0 && unreadable === 0 && bySeverity.error === 0 };
+  return { filesScanned: fileCount, findings: findings.length, rawFindings: rawFindingCount, bySeverity, byCategory, byRule, parseErrors: parseErrors.length, unreadableFiles: unreadable, unsupportedFiles: skipped.unsupported?.length ?? 0, baselineEntries: baseline.size, passed: parseErrors.length === 0 && unreadable === 0 && bySeverity.error === 0 };
 }
 
 function summarizeProject(project, fileData, fileCount, skipped = {}) {
@@ -313,11 +464,13 @@ function summarizeProject(project, fileData, fileCount, skipped = {}) {
   }
   const sourceFiles = fileData.filter((f) => f.kind === 'source').length;
   const textFiles = fileData.filter((f) => f.kind === 'text').length;
+  const languageCounts = {};
+  for (const f of fileData) languageCounts[f.language ?? 'unknown'] = (languageCounts[f.language ?? 'unknown'] ?? 0) + 1;
   return {
     files: fileCount, filesRead: fileData.length, sourceFiles, textFiles,
     binaryFilesSkipped: skipped.binary?.length ?? 0, oversizedFilesSkipped: skipped.oversized?.length ?? 0,
-    unreadableFiles: skipped.unreadable?.length ?? 0,
-    lines: totalLines, bytes: totalBytes, languages,
+    unreadableFiles: skipped.unreadable?.length ?? 0, unsupportedFiles: skipped.unsupported?.length ?? 0,
+    lines: totalLines, bytes: totalBytes, languages, languageCounts,
     dependencyCount: project.manifest ? Object.keys(project.manifest.dependencies ?? {}).length : 0, imports: project.imports.length
   };
 }

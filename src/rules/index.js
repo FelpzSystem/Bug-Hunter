@@ -1,5 +1,6 @@
 import { report, literalValue, memberPath, analyzeLexicalScopes, resolveBinding } from './helpers.js';
 import { complexityOfFunction, getCalleeName, isFunction, walkAst } from '../core/utils.js';
+import { hardeningRules } from './hardening.js';
 
 const isStaticLiteral = (node) => ['StringLiteral', 'NumericLiteral', 'BooleanLiteral', 'NullLiteral', 'RegExpLiteral'].includes(node?.type);
 const isIdentifier = (node, name) => node?.type === 'Identifier' && (name ? node.name === name : true);
@@ -14,7 +15,7 @@ function isConsoleAllowedPath(file, allowlist = []) {
   });
 }
 
-export const rules = [
+const baseRules = [
   {
     id: 'BH001', title: 'Undefined identifier', severity: 'error', category: 'correctness', confidence: 'medium',
     suggestion: 'Verifique o import, declaração, escopo ou nome digitado.',
@@ -299,10 +300,88 @@ export const rules = [
   {
     id: 'BH050', title: 'Hard-coded production localhost', severity: 'info', category: 'maintainability', confidence: 'low', suggestion: 'Externalize endpoints por ambiente para evitar configuração fixa.', description: 'Dica para URLs localhost hard-coded.',
     check(ctx) { walkAst(ctx.ast, (n) => { const v = literalValue(n); if (typeof v === 'string' && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/.test(v)) report(ctx, this, n, `Endpoint local hard-coded: ${v}`); }); }
-  }
+  },
+  {
+    id: 'BH061', title: 'CommonJS runtime syntax in ESM', severity: 'error', category: 'correctness', confidence: 'high',
+    suggestion: 'Use import/export e APIs ESM; para interoperabilidade controlada, crie explicitamente um require via mecanismo suportado pelo ambiente.',
+    description: 'Detecta require() e exports/module.exports não declarados em arquivos tratados como ESM.',
+    check(ctx) {
+      if (ctx.module?.kind !== 'esm') return;
+      const model = analyzeLexicalScopes(ctx.ast);
+      walkAst(ctx.ast, (n) => {
+        if (n.type === 'CallExpression' && n.callee?.type === 'Identifier' && n.callee.name === 'require') {
+          const scope = model.scopeByNode.get(n.callee) ?? model.root;
+          if (!resolveBinding(scope, 'require')) report(ctx, this, n, 'require() é usado em um módulo tratado como ESM sem binding local.');
+        }
+        if ((n.type === 'MemberExpression' || n.type === 'OptionalMemberExpression')) {
+          const path = memberPath(n);
+          if (n.object?.type !== 'Identifier') return;
+          if (!path || (!/^module\.exports(?:\.|$)/.test(path) && !/^exports\./.test(path))) return;
+          report(ctx, this, n, `${path} é sintaxe CommonJS em arquivo tratado como ESM.`);
+        }
+      });
+    }
+  },
+  {
+    id: 'BH062', title: 'ES module syntax in CommonJS', severity: 'error', category: 'correctness', confidence: 'high',
+    suggestion: 'Converta o arquivo para ESM ou reescreva os imports/exports para CommonJS de forma consistente.',
+    description: 'Detecta import/export estático em arquivos tratados como CommonJS.',
+    check(ctx) {
+      if (ctx.module?.kind !== 'cjs') return;
+      walkAst(ctx.ast, (n) => {
+        if (['ImportDeclaration', 'ExportNamedDeclaration', 'ExportDefaultDeclaration', 'ExportAllDeclaration'].includes(n.type)) {
+          report(ctx, this, n, 'Sintaxe ESM encontrada em arquivo tratado como CommonJS.');
+        }
+      });
+    }
+  },
+  {
+    id: 'BH063', title: 'import.meta in CommonJS', severity: 'error', category: 'correctness', confidence: 'high',
+    suggestion: 'Remova import.meta ou converta o arquivo para ESM se esse recurso for necessário.',
+    description: 'Detecta import.meta fora de módulos ESM.',
+    check(ctx) {
+      if (ctx.module?.kind !== 'cjs') return;
+      walkAst(ctx.ast, (n) => {
+        if (n.type === 'MetaProperty' && n.meta?.name === 'import') report(ctx, this, n, 'import.meta exige contexto de módulo ESM.');
+      });
+    }
+  },
+  {
+    id: 'BH064', title: 'Top-level await in CommonJS', severity: 'error', category: 'correctness', confidence: 'high',
+    suggestion: 'Mova o await para uma função async ou converta o arquivo para ESM quando o runtime permitir.',
+    description: 'Detecta await no nível superior de arquivos tratados como CommonJS.',
+    check(ctx) {
+      if (ctx.module?.kind !== 'cjs') return;
+      walkAst(ctx.ast, (n) => {
+        if (n.type !== 'AwaitExpression') return;
+        let parent = ctx.parents.get(n);
+        while (parent && !isFunction(parent)) parent = ctx.parents.get(parent);
+        if (!parent) report(ctx, this, n, 'await aparece no nível superior de um módulo CommonJS.');
+      });
+    }
+  },
+  {
+    id: 'BH065', title: 'Extensionless relative ESM import', severity: 'info', category: 'correctness', confidence: 'low',
+    suggestion: 'Em builds que dependem da resolução ESM nativa do runtime, use a extensão real do arquivo no import relativo.',
+    description: 'Sinaliza imports relativos sem extensão em arquivos JavaScript ESM onde a resolução nativa pode exigir o nome completo.',
+    check(ctx) {
+      if (!ctx.options.checkEsmExtensions || ctx.module?.kind !== 'esm') return;
+      const ext = ctx.module.extension;
+      if (!['.js', '.mjs'].includes(ext)) return;
+      walkAst(ctx.ast, (n) => {
+        if (!['ImportDeclaration', 'ExportNamedDeclaration', 'ExportAllDeclaration'].includes(n.type)) return;
+        const value = n.source?.value;
+        if (typeof value !== 'string' || !/^\.\.?\//.test(value)) return;
+        if (/\.[A-Za-z0-9]+(?:[?#].*)?$/.test(value) || value.endsWith('/')) return;
+        report(ctx, this, n.source, `Import relativo “${value}” não informa extensão de arquivo.`);
+      });
+    }
+  },
 ];
 
 
+
+export const rules = [...baseRules, ...hardeningRules];
 
 function looksExternalInput(node) {
   if (!node) return false;
@@ -361,6 +440,24 @@ function collectIdentifierUses(ast, ctx, model) {
   return uses;
 }
 
+
+export const pythonRules = [
+  { id: 'BH066', title: 'Mutable default argument', severity: 'warning', category: 'correctness', description: 'Argumento padrão mutável pode ser compartilhado entre chamadas de uma função Python.' },
+  { id: 'BH067', title: 'Bare except', severity: 'warning', category: 'correctness', description: 'except sem tipo captura exceções amplas demais.' },
+  { id: 'BH068', title: 'Swallowed exception', severity: 'warning', category: 'correctness', description: 'except Exception com pass engole erros sem diagnóstico.' },
+  { id: 'BH069', title: 'Dynamic code execution', severity: 'error', category: 'security', description: 'eval/exec/compile podem executar ou compilar código dinâmico.' },
+  { id: 'BH070', title: 'os.system shell command', severity: 'error', category: 'security', description: 'os.system executa comandos por shell.' },
+  { id: 'BH071', title: 'Insecure temporary file', severity: 'warning', category: 'security', description: 'tempfile.mktemp cria nomes temporários sem reservar o arquivo.' },
+  { id: 'BH072', title: 'Unsafe pickle deserialization', severity: 'error', category: 'security', description: 'pickle pode executar código durante a desserialização.' },
+  { id: 'BH073', title: 'Unsafe YAML load', severity: 'error', category: 'security', description: 'yaml.load sem loader seguro merece revisão.' },
+  { id: 'BH074', title: 'subprocess shell=True', severity: 'error', category: 'security', description: 'shell=True amplia a superfície para injeção de comandos.' },
+  { id: 'BH075', title: 'TLS verification disabled', severity: 'error', category: 'security', description: 'verify=False desativa validação de certificado TLS.' },
+  { id: 'BH076', title: 'Assert used for runtime validation', severity: 'info', category: 'correctness', description: 'assert não deve ser a única validação obrigatória em runtime.' },
+  { id: 'BH077', title: 'Weak Python hash', severity: 'warning', category: 'security', description: 'hashlib.md5/sha1 pode ser inadequado para objetivos criptográficos modernos.' },
+  { id: 'BH078', title: 'Non-cryptographic randomness for secret', severity: 'error', category: 'security', description: 'random.* não deve gerar tokens, chaves, nonces ou outros segredos.' },
+  { id: 'BH079', title: 'Unverified TLS context', severity: 'error', category: 'security', description: 'Contextos TLS sem validação de certificado podem permitir interceptação.' }
+];
+
 export const projectRules = [
   { id: 'BH051', title: 'Possibly unused dependency', severity: 'warning', category: 'maintainability', scope: 'project', description: 'Dependência declarada em dependencies que não apareceu em imports/requires analisados.' },
   { id: 'BH052', title: 'Undeclared external dependency', severity: 'error', category: 'correctness', scope: 'project', description: 'Pacote externo usado pelo código e não declarado no package.json.' },
@@ -371,9 +468,11 @@ export const projectRules = [
   { id: 'BH057', title: 'Console flood', severity: 'warning', category: 'maintainability', scope: 'project', description: 'Arquivo com volume elevado de chamadas console.' },
   { id: 'BH058', title: 'TODO/FIXME debt', severity: 'info', category: 'maintainability', scope: 'project', description: 'Comentários TODO/FIXME encontrados no projeto.' },
   { id: 'BH059', title: 'Secret-like value in project file', severity: 'error', category: 'security', scope: 'project', description: 'Valor com aparência de credencial encontrado em arquivo de texto do projeto.' },
-  { id: 'BH060', title: 'Private key material', severity: 'error', category: 'security', scope: 'project', description: 'Material de chave privada encontrado em arquivo de texto do projeto.' }
+  { id: 'BH060', title: 'Private key material', severity: 'error', category: 'security', scope: 'project', description: 'Material de chave privada encontrado em arquivo de texto do projeto.' },
+  { id: 'BH080', title: 'Undeclared Python dependency', severity: 'warning', category: 'correctness', scope: 'project', description: 'Módulo Python externo importado sem declaração correspondente em requirements*.txt ou pyproject.toml.' }
 ];
 
-export const allRules = [...rules, ...projectRules];
+export const allRules = [...rules, ...pythonRules, ...projectRules];
+export { hardeningRules };
 export const RULE_COUNT = allRules.length;
 

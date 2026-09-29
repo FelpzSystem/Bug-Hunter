@@ -28,6 +28,17 @@ export function formatPretty(result, opts = {}) {
   out.push(`  ${c(RED, `✖ ${s.bySeverity.error}`)} errors    ${c(YELLOW, `⚠ ${s.bySeverity.warning}`)} warnings    ${c(CYAN, `ℹ ${s.bySeverity.info}`)} info`);
   out.push(`  Categories: ${Object.entries(s.byCategory).map(([k,v]) => `${k}=${v}`).join('  ') || 'none'}`);
 
+  if (result.ai) {
+    out.push('');
+    out.push(c(MAGENTA, '🤖 AI SUPPORT'));
+    if (result.ai.error) out.push(`  AI error: ${result.ai.error}`);
+    else {
+      if (result.ai.summary) out.push(`  ${result.ai.summary}`);
+      for (const item of (result.ai.prioritizedFindings ?? []).slice(0, 5)) out.push(`  • ${item.ruleId ?? 'AI'} ${item.file ?? ''} — ${item.reason ?? item.fix ?? ''}`);
+      if ((result.ai.nextSteps ?? []).length) out.push(`  Next: ${result.ai.nextSteps.slice(0, 3).join(' • ')}`);
+    }
+  }
+
   const hotspots = buildHotspots(result);
   if (hotspots.length) {
     out.push('');
@@ -80,6 +91,8 @@ export function formatCompact(result, opts = {}) {
   out.push(`Files: ${result.project.filesRead}/${result.project.files} read • ${result.project.sourceFiles} source • ${formatBytes(result.project.bytes)}`);
   out.push(`Findings: ${s.findings} • ${c(RED, `${s.bySeverity.error} errors`)} • ${c(YELLOW, `${s.bySeverity.warning} warnings`)} • ${c(CYAN, `${s.bySeverity.info} info`)}`);
   out.push(`Health: ${s.healthScore}/100 • ${s.findingsPerKLoc} findings/KLoC`);
+  if (result.ai?.summary) out.push(`AI: ${result.ai.summary}`);
+  if (result.ai?.error) out.push(`AI: ${result.ai.error}`);
   if (result.parseErrors.length) out.push(c(RED, `Parser errors: ${result.parseErrors.length}`));
   if (s.passed) out.push(c(GREEN, 'Status: PASS'));
   else out.push(c(RED, 'Status: FAIL — veja o log detalhado'));
@@ -111,7 +124,7 @@ function severityIcon(s, color = true) { const icon = s === 'error' ? '✖' : s 
 function healthBar(score = 0) { const filled = Math.round(score / 10); return `[${'█'.repeat(filled)}${'░'.repeat(10-filled)}]`; }
 function formatBytes(n) { if (n < 1024) return `${n} B`; if (n < 1024*1024) return `${(n/1024).toFixed(1)} KB`; return `${(n/1024/1024).toFixed(1)} MB`; }
 
-export function formatJson(result) { return JSON.stringify({ project: result.project, summary: result.summary, findings: result.findings, parseErrors: result.parseErrors, skipped: result.skipped }, null, 2); }
+export function formatJson(result) { return JSON.stringify({ project: result.project, summary: result.summary, findings: result.findings, parseErrors: result.parseErrors, skipped: result.skipped, ai: result.ai ?? null }, null, 2); }
 
 export function formatSarif(result) {
   const ruleMap = new Map();
@@ -130,11 +143,13 @@ export function formatMarkdown(result) {
   const out = [`# Bug Hunter report`, '', `**${result.project.files} files found · ${result.project.filesRead} read · ${result.project.lines} lines · ${s.findings} findings**`, '', `**Credits:** Shark`, '', `| Severity | Count |`, `|---|---:|`, `| Error | ${s.bySeverity.error} |`, `| Warning | ${s.bySeverity.warning} |`, `| Info | ${s.bySeverity.info} |`, ''];
   if (!result.findings.length) out.push('## ✅ No findings');
   for (const f of result.findings) { out.push(`## ${f.ruleId} — ${f.title}`, '', `**${f.file}:${f.line}:${f.column+1}** · ${f.severity} · ${f.category}`, '', f.message, '', '```text', f.codeFrame || f.snippet || '', '```', '', `**Suggested action:** ${f.suggestion ?? 'Review the code path and confirm intent.'}`, ''); }
+  if (result.ai) { out.push('## AI support', '', result.ai.error ? `**Error:** ${result.ai.error}` : result.ai.summary || 'AI review completed.', ''); for (const item of (result.ai.prioritizedFindings ?? []).slice(0, 10)) out.push(`- **${item.ruleId ?? 'AI'}** ${item.file ?? ''}: ${item.reason ?? item.fix ?? ''}`); }
   return out.join('\n');
 }
 
 export function formatHtml(result) {
   const findings = result.findings.map((f) => `<article class="finding ${f.severity}"><div class="meta"><b>${escapeHtml(f.ruleId)}</b> · ${escapeHtml(f.title)} · ${escapeHtml(f.file)}:${f.line}</div><p>${escapeHtml(f.message)}</p><pre>${escapeHtml(f.codeFrame || f.snippet || '')}</pre><div class="fix">→ ${escapeHtml(f.suggestion || '')}</div></article>`).join('');
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Bug Hunter</title><style>body{font-family:Inter,system-ui,sans-serif;background:#0b1020;color:#eef2ff;max-width:1100px;margin:40px auto;padding:0 24px}.hero{padding:28px;border-radius:18px;background:linear-gradient(135deg,#171f38,#11182c)}.stats{display:flex;gap:12px;flex-wrap:wrap}.stat{padding:12px 16px;background:#19233f;border-radius:12px}.finding{margin:18px 0;padding:20px;border-radius:14px;background:#121a2d;border-left:4px solid #7dd3fc}.finding.error{border-color:#fb7185}.finding.warning{border-color:#fbbf24}.finding.info{border-color:#60a5fa}.meta{font-size:14px}.finding p{line-height:1.6}pre{overflow:auto;background:#080d19;padding:14px;border-radius:10px}.fix{color:#86efac}</style></head><body><section class="hero"><h1>🐛 Bug Hunter</h1><p>Whole-project static analysis with code context, evidence and remediation hints.</p><p><b>Credits:</b> Shark</p><div class="stats"><div class="stat">${result.project.filesRead}/${result.project.files} files read</div><div class="stat">${result.project.sourceFiles} source</div><div class="stat">${result.project.textFiles} text</div><div class="stat">${result.project.lines} lines</div><div class="stat">✖ ${result.summary.bySeverity.error}</div><div class="stat">⚠ ${result.summary.bySeverity.warning}</div><div class="stat">ℹ ${result.summary.bySeverity.info}</div></div></section>${findings || '<h2>✅ No findings</h2>'}</body></html>`;
+  const aiHtml = result.ai ? `<section class="finding"><div class="meta"><b>AI support</b> · ${escapeHtml(result.ai.provider || '')}</div><p>${escapeHtml(result.ai.error || result.ai.summary || 'AI review completed.')}</p>${(result.ai.prioritizedFindings ?? []).slice(0, 10).map((item) => `<p>• ${escapeHtml(item.ruleId || 'AI')} ${escapeHtml(item.file || '')} — ${escapeHtml(item.reason || item.fix || '')}</p>`).join('')}</section>` : '';
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Bug Hunter</title><style>body{font-family:Inter,system-ui,sans-serif;background:#0b1020;color:#eef2ff;max-width:1100px;margin:40px auto;padding:0 24px}.hero{padding:28px;border-radius:18px;background:linear-gradient(135deg,#171f38,#11182c)}.stats{display:flex;gap:12px;flex-wrap:wrap}.stat{padding:12px 16px;background:#19233f;border-radius:12px}.finding{margin:18px 0;padding:20px;border-radius:14px;background:#121a2d;border-left:4px solid #7dd3fc}.finding.error{border-color:#fb7185}.finding.warning{border-color:#fbbf24}.finding.info{border-color:#60a5fa}.meta{font-size:14px}.finding p{line-height:1.6}pre{overflow:auto;background:#080d19;padding:14px;border-radius:10px}.fix{color:#86efac}</style></head><body><section class="hero"><h1>🐛 Bug Hunter</h1><p>Whole-project static analysis with code context, evidence and remediation hints.</p><p><b>Credits:</b> Shark</p><div class="stats"><div class="stat">${result.project.filesRead}/${result.project.files} files read</div><div class="stat">${result.project.sourceFiles} source</div><div class="stat">${result.project.textFiles} text</div><div class="stat">${result.project.lines} lines</div><div class="stat">✖ ${result.summary.bySeverity.error}</div><div class="stat">⚠ ${result.summary.bySeverity.warning}</div><div class="stat">ℹ ${result.summary.bySeverity.info}</div></div></section>${findings || '<h2>✅ No findings</h2>'}${aiHtml}</body></html>`;
 }
 function escapeHtml(value) { return String(value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }

@@ -1,7 +1,7 @@
 {
   "name": "bug-hunter-static",
-  "version": "0.3.1-demo.1",
-  "description": "Deep whole-project static bug, security and project-health analyzer for JavaScript and TypeScript.",
+  "version": "0.6.0-demo.1",
+  "description": "Deep static bug, security, project-health and AI-assisted analyzer for JavaScript, TypeScript, CommonJS, ESM and Python.",
   "type": "module",
   "main": "./src/index.js",
   "bin": {
@@ -12,37 +12,28 @@
   },
   "files": [
     "src",
-    "examples",
-    "docs",
     "README.md",
-    "LICENSE",
-    "CHANGELOG.md",
-    "SECURITY.md",
-    "CONTRIBUTING.md"
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"
   },
-  "scripts": {
-    "test": "node --test \"test/*.test.js\"",
-    "scan:self": "node ./src/cli/index.js scan . --format pretty --ci",
-    "demo": "node ./src/cli/index.js demo",
-    "demo:report": "node ./src/cli/index.js scan ./examples/demo-project --format html > demo-report.html",
-    "demo:json": "node ./src/cli/index.js scan ./examples/demo-project --format json > demo-report.json",
-    "pack:release": "npm pack --pack-destination .release",
-    "prepublishOnly": "npm test && npm pack --dry-run",
-    "release": "node ./scripts/release.mjs"
-  },
+  "scripts": {},
   "keywords": [
     "static-analysis",
     "lint",
     "javascript",
     "typescript",
+    "python",
+    "commonjs",
+    "esm",
     "security",
     "bugs",
     "sast",
     "code-quality",
-    "ast"
+    "ast",
+    "ai",
+    "ai-assistant"
   ],
   "license": "MIT",
   "dependencies": {

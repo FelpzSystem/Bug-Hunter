@@ -15,13 +15,24 @@ const basePlugins = [
   'logicalAssignment',
   'numericSeparator',
   'privateIn',
-  'regexpUnicodeSets'
+  'regexpUnicodeSets',
+  'explicitResourceManagement',
+  'importAttributes'
 ];
 
-export function parseSource(code, filename = 'unknown.js') {
-  const isTS = /\.(?:ts|tsx|mts|cts)$/.test(filename);
+export function sourceLanguage(filename = 'unknown.js') {
+  const lower = String(filename).toLowerCase();
+  if (/\.(?:py|pyw|pyi)$/.test(lower)) return 'python';
+  if (/\.(?:ts|tsx|mts|cts|d\.ts)$/.test(lower)) return 'typescript';
+  if (/\.(?:js|jsx|mjs|cjs)$/.test(lower)) return 'javascript';
+  return 'text';
+}
+
+export function parseSource(code, filename = 'unknown.js', options = {}) {
+  const isTS = /\.(?:ts|tsx|mts|cts)$/.test(String(filename).toLowerCase());
+  const sourceType = options.sourceType === 'module' || options.sourceType === 'script' ? options.sourceType : 'unambiguous';
   return parse(code, {
-    sourceType: 'unambiguous',
+    sourceType,
     sourceFilename: filename,
     errorRecovery: false,
     ranges: true,
