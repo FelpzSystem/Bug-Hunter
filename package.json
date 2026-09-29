@@ -1,0 +1,66 @@
+{
+  "name": "bug-hunter-static",
+  "version": "0.3.1",
+  "description": "Deep whole-project static bug, security and project-health analyzer for JavaScript and TypeScript.",
+  "type": "module",
+  "main": "./src/index.js",
+  "bin": {
+    "bug-hunter": "src/cli/index.js"
+  },
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "examples",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "scan:self": "node ./src/cli/index.js scan . --format pretty --ci",
+    "demo": "node ./src/cli/index.js demo",
+    "demo:report": "node ./src/cli/index.js scan ./examples/demo-project --format html > demo-report.html",
+    "demo:json": "node ./src/cli/index.js scan ./examples/demo-project --format json > demo-report.json",
+    "pack:release": "npm pack --pack-destination .release",
+    "prepublishOnly": "npm test && npm pack --dry-run",
+    "release": "node ./scripts/release.mjs",
+    "publish:github": "node ./scripts/publish-github.mjs"
+  },
+  "keywords": [
+    "static-analysis",
+    "lint",
+    "javascript",
+    "typescript",
+    "security",
+    "bugs",
+    "sast",
+    "code-quality",
+    "ast"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@babel/parser": "7.29.9",
+    "commander": "15.0.0"
+  },
+  "author": "Shark",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FelpzSystem/Shark.git"
+  },
+  "bugs": {
+    "url": "https://github.com/FelpzSystem/Shark/issues"
+  },
+  "homepage": "https://github.com/FelpzSystem/Shark#readme"
+}
