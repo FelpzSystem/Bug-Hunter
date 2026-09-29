@@ -1,6 +1,6 @@
 {
   "name": "bug-hunter-static",
-  "version": "0.3.1",
+  "version": "0.3.1-demo.1",
   "description": "Deep whole-project static bug, security and project-health analyzer for JavaScript and TypeScript.",
   "type": "module",
   "main": "./src/index.js",
@@ -31,8 +31,7 @@
     "demo:json": "node ./src/cli/index.js scan ./examples/demo-project --format json > demo-report.json",
     "pack:release": "npm pack --pack-destination .release",
     "prepublishOnly": "npm test && npm pack --dry-run",
-    "release": "node ./scripts/release.mjs",
-    "publish:github": "node ./scripts/publish-github.mjs"
+    "release": "node ./scripts/release.mjs"
   },
   "keywords": [
     "static-analysis",
@@ -55,12 +54,5 @@
     "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/FelpzSystem/Shark.git"
-  },
-  "bugs": {
-    "url": "https://github.com/FelpzSystem/Shark/issues"
-  },
-  "homepage": "https://github.com/FelpzSystem/Shark#readme"
+  "releaseChannel": "demo"
 }

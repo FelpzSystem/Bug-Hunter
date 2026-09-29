@@ -16,14 +16,15 @@ program.name('bug-hunter').description('Static bug, security and project-health 
 program.command('scan')
   .argument('[path]', 'project/file to scan', '.')
   .option('--format <format>', 'pretty|json|sarif|markdown|html', 'pretty')
-  .option('--min-severity <severity>', 'info|warning|error', 'info')
+  .option('--min-severity <severity>', 'info|warning|error', 'warning')
   .option('--ignore <patterns>', 'comma-separated directory/file names to skip', '')
   .option('--max-file-bytes <n>', 'skip files larger than this many bytes', '10485760')
   .option('--disable <rules>', 'comma-separated rule IDs', '')
   .option('--max-complexity <n>', 'complexity threshold', '12')
   .option('--max-function-lines <n>', 'function line threshold', '60')
   .option('--max-file-lines <n>', 'file line threshold', '500')
-  .option('--max-console-calls <n>', 'console threshold per file', '8')
+  .option('--max-console-calls <n>', 'console threshold per file', '12')
+  .option('--console-allow <paths>', 'paths where console.log is intentional', '')
   .option('--context-lines <n>', 'source context lines around each finding', '2')
   .option('--baseline <file>', 'baseline path', '.bug-hunter-baseline.json')
   .option('--no-baseline', 'show findings currently in baseline too')
@@ -31,22 +32,36 @@ program.command('scan')
   .option('--ci', 'exit 1 on error findings or parser errors')
   .option('--config <file>', 'config path relative to project root')
   .option('--no-color', 'disable terminal colors')
+  .option('--verbose', 'show the full report in the terminal instead of the compact summary')
+  .option('--log-file <file>', 'text log/report path', '.bug-hunter/scan.log.txt')
+  .option('--no-log-file', 'do not save the detailed text log')
   .action(async (target, opts) => {
     const ignore = opts.ignore ? opts.ignore.split(',').map((x) => x.trim()).filter(Boolean) : undefined;
     const disableRules = opts.disable ? opts.disable.split(',').map((x) => x.trim()).filter(Boolean) : undefined;
+    const consoleAllowedPaths = opts.consoleAllow ? opts.consoleAllow.split(',').map((x) => x.trim()).filter(Boolean) : undefined;
     const result = await scanProject(target, {
-      minSeverity: opts.minSeverity, ignore, disableRules,
+      minSeverity: opts.minSeverity, ignore, disableRules, consoleAllowedPaths,
       maxComplexity: Number(opts.maxComplexity), maxFunctionLines: Number(opts.maxFunctionLines), maxFileLines: Number(opts.maxFileLines),
       maxConsoleCalls: Number(opts.maxConsoleCalls), contextLines: Number(opts.contextLines), maxFileBytes: Number(opts.maxFileBytes), baseline: opts.baseline,
       baselineMode: opts.writeBaseline ? 'show' : (opts.noBaseline ? 'show' : 'ignore'), config: opts.config
     });
     if (opts.writeBaseline) { const targetFile = await writeBaseline(result.root, result.findings, opts.baseline); console.log(`Baseline criado: ${targetFile}`); return; }
     const format = opts.format;
-    if (format === 'json') console.log(formatJson(result));
-    else if (format === 'sarif') console.log(formatSarif(result));
-    else if (format === 'markdown') console.log(formatMarkdown(result));
-    else if (format === 'html') console.log(formatHtml(result));
-    else console.log(formatPretty(result, { color: !opts.noColor }));
+    let output;
+    if (format === 'json') output = formatJson(result);
+    else if (format === 'sarif') output = formatSarif(result);
+    else if (format === 'markdown') output = formatMarkdown(result);
+    else if (format === 'html') output = formatHtml(result);
+    else output = formatPretty({ ...result, version: VERSION }, { color: !opts.noColor, compact: !opts.verbose, logFile: opts.logFile });
+
+    if (opts.logFile !== false && opts.logFile) {
+      const logTarget = path.resolve(result.root, opts.logFile);
+      await fs.mkdir(path.dirname(logTarget), { recursive: true });
+      const detailed = formatPretty({ ...result, version: VERSION }, { color: false, compact: false });
+      await fs.writeFile(logTarget, detailed, 'utf8');
+      if (format === 'pretty') output = formatPretty({ ...result, version: VERSION }, { color: !opts.noColor, compact: !opts.verbose, logFile: path.relative(result.root, logTarget) || logTarget });
+    }
+    console.log(output);
     if (opts.ci && !result.summary.passed) process.exitCode = 1;
   });
 
@@ -62,7 +77,7 @@ program.command('explain').description('explica uma regra com exemplo de uso').a
 
 program.command('init').description('cria uma configuração padrão').argument('[path]', 'diretório', '.').action(async (target) => {
   const file = path.resolve(target, 'bug-hunter.config.json');
-  const config = { minSeverity: 'info', maxComplexity: 12, maxFunctionLines: 60, maxFileLines: 500, maxConsoleCalls: 8, contextLines: 2, maxFileBytes: 10485760, ignore: ['node_modules','.git','.hg','.svn'], disableRules: [], baseline: '.bug-hunter-baseline.json', baselineMode: 'ignore' };
+  const config = { minSeverity: 'warning', maxComplexity: 12, maxFunctionLines: 60, maxFileLines: 500, maxConsoleCalls: 12, contextLines: 2, maxFileBytes: 10485760, ignore: ['node_modules','.git','.hg','.svn','.bug-hunter'], consoleAllowedPaths: ['tools','scripts','test','tests','examples'], disableRules: [], baseline: '.bug-hunter-baseline.json', baselineMode: 'ignore' };
   await fs.writeFile(file, JSON.stringify(config, null, 2) + '\n'); console.log(`Configuração criada: ${file}`);
 });
 

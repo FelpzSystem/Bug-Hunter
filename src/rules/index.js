@@ -4,6 +4,16 @@ import { complexityOfFunction, getCalleeName, isFunction, walkAst } from '../cor
 const isStaticLiteral = (node) => ['StringLiteral', 'NumericLiteral', 'BooleanLiteral', 'NullLiteral', 'RegExpLiteral'].includes(node?.type);
 const isIdentifier = (node, name) => node?.type === 'Identifier' && (name ? node.name === name : true);
 
+
+function isConsoleAllowedPath(file, allowlist = []) {
+  const normalized = String(file ?? '').replaceAll('\\', '/').replace(/^\/+/, '');
+  return allowlist.some((entry) => {
+    const prefix = String(entry).replaceAll('\\', '/').replace(/^\/+|\/+$/g, '');
+    if (!prefix) return false;
+    return normalized === prefix || normalized.startsWith(`${prefix}/`);
+  });
+}
+
 export const rules = [
   {
     id: 'BH001', title: 'Undefined identifier', severity: 'error', category: 'correctness', confidence: 'medium',
@@ -178,8 +188,13 @@ export const rules = [
     check(ctx) { walkAst(ctx.ast, (n) => { if (n.type === 'VariableDeclaration' && n.kind === 'var') report(ctx, this, n, 'Prefira let/const para evitar escopo de função inesperado.'); }); }
   },
   {
-    id: 'BH024', title: 'Console in application code', severity: 'info', category: 'maintainability', suggestion: 'Use o logger da aplicação ou mantenha console apenas em scripts/debug intencional.', description: 'Sinaliza console.log/debug/info.',
-    check(ctx) { walkAst(ctx.ast, (n) => { if (n.type === 'CallExpression' && /^(console)\.(log|debug|info)$/.test(getCalleeName(n) ?? '')) report(ctx, this, n, 'console.* encontrado; use o mecanismo de logging da aplicação quando apropriado.'); }); }
+    id: 'BH024', title: 'Console in application code', severity: 'info', category: 'maintainability', suggestion: 'Use o logger da aplicação ou mantenha console apenas em scripts/debug intencional.', description: 'Sinaliza console.log/debug/info em código de aplicação, mas ignora por padrão diretórios de ferramentas, scripts, testes e exemplos onde console é normalmente a saída intencional.',
+    check(ctx) {
+      if (isConsoleAllowedPath(ctx.file, ctx.options.consoleAllowedPaths)) return;
+      walkAst(ctx.ast, (n) => {
+        if (n.type === 'CallExpression' && /^(console)\.(log|debug|info)$/.test(getCalleeName(n) ?? '')) report(ctx, this, n, 'console.* encontrado em código de aplicação; use o mecanismo de logging da aplicação quando apropriado.');
+      });
+    }
   },
   {
     id: 'BH025', title: 'Function too complex', severity: 'warning', category: 'maintainability', suggestion: 'Extraia decisões para funções menores e reduza branches aninhados.', description: 'Mede complexidade aproximada por AST.',

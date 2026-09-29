@@ -9,12 +9,13 @@ const MAGENTA = '\x1b[35m';
 
 export function formatPretty(result, opts = {}) {
   const color = opts.color ?? (process.stdout.isTTY && process.env.NO_COLOR == null);
+  if (opts.compact) return formatCompact(result, opts);
   const c = (code, value) => color ? code + value + RESET : value;
   const out = [];
   const s = result.summary;
   out.push('');
   out.push(c(BOLD, '╔══════════════════════════════════════════════════════════════════════╗'));
-  out.push(c(BOLD, '║  🐛 BUG HUNTER — STATIC ANALYSIS                                    ║'));
+  out.push(c(BOLD, `║  🐛 BUG HUNTER — DEMO v${result.version ?? '0.3.1-demo.1'} • STATIC ANALYSIS ║`));
   out.push(c(BOLD, '╚══════════════════════════════════════════════════════════════════════╝'));
   out.push(c(DIM, `  ${result.root}`));
   out.push('');
@@ -66,6 +67,32 @@ export function formatPretty(result, opts = {}) {
   out.push(c(DIM, '  Dica: rode com --format json/sarif para automação; use --write-baseline para aceitar o estado atual.'));
   out.push('');
   return out.join('\n');
+}
+
+
+export function formatCompact(result, opts = {}) {
+  const color = opts.color ?? (process.stdout.isTTY && process.env.NO_COLOR == null);
+  const c = (code, value) => color ? code + value + RESET : value;
+  const s = result.summary;
+  const out = [];
+  out.push(c(BOLD, `🐛 BUG HUNTER — DEMO v${result.version ?? '0.3.1-demo.1'}`));
+  out.push(`Target: ${result.target}`);
+  out.push(`Files: ${result.project.filesRead}/${result.project.files} read • ${result.project.sourceFiles} source • ${formatBytes(result.project.bytes)}`);
+  out.push(`Findings: ${s.findings} • ${c(RED, `${s.bySeverity.error} errors`)} • ${c(YELLOW, `${s.bySeverity.warning} warnings`)} • ${c(CYAN, `${s.bySeverity.info} info`)}`);
+  out.push(`Health: ${s.healthScore}/100 • ${s.findingsPerKLoc} findings/KLoC`);
+  if (result.parseErrors.length) out.push(c(RED, `Parser errors: ${result.parseErrors.length}`));
+  if (s.passed) out.push(c(GREEN, 'Status: PASS'));
+  else out.push(c(RED, 'Status: FAIL — veja o log detalhado'));
+  if (opts.logFile) out.push(c(DIM, `Log detalhado: ${opts.logFile}`));
+  if (result.findings.length) {
+    out.push('');
+    out.push(c(BOLD, 'Principais achados:'));
+    for (const f of result.findings.slice(0, 5)) {
+      out.push(`  ${severityIcon(f.severity, color)} ${f.ruleId} ${f.file}:${f.line} — ${f.message}`);
+    }
+    if (result.findings.length > 5) out.push(c(DIM, `  … e mais ${result.findings.length - 5}. Abra o log para o relatório completo.`));
+  }
+  return out.join('\n') + '\n';
 }
 
 function buildHotspots(result) {

@@ -6,7 +6,7 @@ import { rules } from '../rules/index.js';
 import { hashFinding, isIgnoredLine, locOf, severityAtLeast, snippet, codeFrame, packageNameFromSpecifier, isLikelyBuiltin, lineCount, getCalleeName, walkAst } from './utils.js';
 
 const DEFAULT_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts']);
-const DEFAULT_IGNORES = ['node_modules', '.git', '.hg', '.svn'];
+const DEFAULT_IGNORES = ['node_modules', '.git', '.hg', '.svn', '.bug-hunter'];
 const DEFAULT_MAX_FILE_BYTES = 10 * 1024 * 1024;
 const ALWAYS_BINARY_EXTENSIONS = new Set(['.png','.jpg','.jpeg','.gif','.webp','.ico','.bmp','.tiff','.zip','.gz','.tgz','.tar','.7z','.rar','.pdf','.woff','.woff2','.ttf','.otf','.eot','.mp3','.wav','.ogg','.mp4','.mov','.avi','.webm','.exe','.dll','.so','.dylib','.node','.class']);
 const DEFAULT_GLOBALS = new Set([
@@ -181,12 +181,19 @@ async function loadConfig(root, options) {
     maxComplexity: finiteNumber(options.maxComplexity ?? fileConfig.maxComplexity, 12, 0),
     maxFunctionLines: finiteNumber(options.maxFunctionLines ?? fileConfig.maxFunctionLines, 60, 0),
     maxFileLines: finiteNumber(options.maxFileLines ?? fileConfig.maxFileLines, 500, 0),
-    maxConsoleCalls: finiteNumber(options.maxConsoleCalls ?? fileConfig.maxConsoleCalls, 8, 0),
+    maxConsoleCalls: finiteNumber(options.maxConsoleCalls ?? fileConfig.maxConsoleCalls, 12, 0),
     contextLines: Math.floor(finiteNumber(options.contextLines ?? fileConfig.contextLines, 2, 0)),
     disableRules: [...new Set(rawDisable.map((x) => String(x).trim().toUpperCase()).filter(Boolean))],
+    consoleAllowedPaths: normalizePathList(options.consoleAllowedPaths ?? fileConfig.consoleAllowedPaths ?? ['tools', 'scripts', 'test', 'tests', 'examples']),
     baseline: options.baseline ?? fileConfig.baseline ?? '.bug-hunter-baseline.json',
     baselineMode
   };
+}
+
+
+function normalizePathList(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => String(item).trim().replaceAll('\\', '/').replace(/^\/+|\/+$/g, '')).filter(Boolean))];
 }
 
 function finiteNumber(value, fallback, minimum = 0) {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { rules, projectRules, allRules } from '../src/rules/index.js';
 import { codeFrame, isIgnoredLine, packageNameFromSpecifier, complexityOfFunction } from '../src/core/utils.js';
 import { analyzeLexicalScopes, resolveBinding } from '../src/rules/helpers.js';
-import { formatJson, formatMarkdown, formatHtml, formatSarif, formatPretty } from '../src/core/reporter.js';
+import { formatJson, formatMarkdown, formatHtml, formatSarif, formatPretty, formatCompact } from '../src/core/reporter.js';
 
 test('rule catalog is broad, unique and documented', () => {
   assert.ok(rules.length >= 50);
@@ -36,6 +36,43 @@ test('scope analysis resolves lexical bindings without sibling leakage', () => {
   assert.equal(resolveBinding(innerScope, 'value'), innerScope);
   assert.equal(resolveBinding(innerScope, 'missing'), null);
   assert.equal(model.declarations.filter((d) => d.name === 'value').length, 2);
+});
+
+test('BH024 ignores console output in intentional tooling paths but reports application console', () => {
+  const rule = rules.find((item) => item.id === 'BH024');
+  const consoleCall = {
+    type: 'CallExpression',
+    callee: {
+      type: 'MemberExpression',
+      computed: false,
+      object: { type: 'Identifier', name: 'console' },
+      property: { type: 'Identifier', name: 'log' }
+    },
+    arguments: []
+  };
+  const ast = { type: 'Program', body: [{ type: 'ExpressionStatement', expression: consoleCall }] };
+  const run = (file) => {
+    const findings = [];
+    rule.check({ ast, file, options: { consoleAllowedPaths: ['tools', 'scripts', 'test', 'tests', 'examples'] }, report(finding) { findings.push(finding); } });
+    return findings;
+  };
+  assert.equal(run('tools/verify-mpv.mjs').length, 0);
+  assert.equal(run('scripts/release.mjs').length, 0);
+  assert.equal(run('test/index.test.js').length, 0);
+  assert.equal(run('src/bot.js').length, 1);
+});
+
+test('compact reporter keeps terminal output small while preserving summary', () => {
+  const result = {
+    root: '/demo', target: '/demo', project: { files: 20, filesRead: 18, sourceFiles: 12, textFiles: 6, bytes: 2048 },
+    summary: { findings: 7, findingsPerKLoc: 3.5, healthScore: 72, bySeverity: { error: 1, warning: 4, info: 2 } },
+    findings: [{ ruleId: 'BH011', severity: 'error', file: 'src/app.js', line: 4, message: 'eval usage' }],
+    parseErrors: []
+  };
+  const output = formatCompact(result, { color: false, logFile: '.bug-hunter/scan.log.txt' });
+  assert.match(output, /72\/100/);
+  assert.match(output, /Log detalhado: .bug-hunter\/scan\.log\.txt/);
+  assert.match(output, /BH011 src\/app\.js:4/);
 });
 
 test('BH028 ignores async functions that actually await, including nested object properties', () => {
